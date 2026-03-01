@@ -14,7 +14,7 @@
 ## 安装
 
 ```bash
-pip install requests colorama
+git clone https://github.com/Ropemakers5302/Qinglong-RCE-Scanner.git
 ```
 
 ## 使用
@@ -106,22 +106,6 @@ python scanner.py -u https://target:5700 -p socks5://127.0.0.1:1080
 - **颜色输出**: colorama
 - **编码**: UTF-8 with error='ignore'
 - **重试**: 3次重试 + 10秒超时
-
-## 更新日志
-
-### v2.1
-- ✅ 删除文件上传扫描功能
-- ✅ 增强配置文件读取功能，支持多个配置路径
-- ✅ 完善配置泄露利用，支持交互式菜单选择
-- ✅ 清理冗余注释和分割线
-
-### v2.0
-- ✅ 完整重构代码架构
-- ✅ 新增PowerShell反弹Shell
-- ✅ 改进交互式菜单
-- ✅ 优化批量扫描流程
-- ✅ 增强错误处理
-- ✅ 简化代码逻辑
 
 ## License
 
