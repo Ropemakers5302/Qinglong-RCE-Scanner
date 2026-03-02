@@ -10,6 +10,8 @@ from datetime import datetime
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, Any
+from colorama import init, Fore, Style, Back
+init(autoreset=True)
 
 def print_banner():
     print(f"{Fore.RED}Qinglong RCE Scanner{Style.RESET_ALL}")
