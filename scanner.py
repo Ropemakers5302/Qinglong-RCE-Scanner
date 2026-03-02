@@ -540,10 +540,10 @@ def main():
     
     if args.help or (not args.url and not args.file):
         print(f"""
-  单个扫描: python 学习.py -u https://target:5700
-  直接执行: python 学习.py -u https://target:5700 -c "id"
-  批量扫描: python 学习.py -f targets.txt -j 10
-  使用代理: python 学习.py -u https://target:5700 -p socks5://127.0.0.1:1080
+  单个扫描: python scanner.py -u https://target:5700
+  直接执行: python scanner.py -u https://target:5700 -c "id"
+  批量扫描: python scanner.py -f targets.txt -j 10
+  使用代理: python scanner.py -u https://target:5700 -p socks5://127.0.0.1:1080
   """)
     sys.exit(0)
     
@@ -661,4 +661,5 @@ def main():
             sys.exit(1)
 
 if __name__ == "__main__":
+
     main()
